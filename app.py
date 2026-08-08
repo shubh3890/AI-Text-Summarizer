@@ -1,56 +1,41 @@
 import re
+import streamlit as st
 import torch
-from fastapi import FastAPI, Request
-from pydantic import BaseModel
 from transformers import T5ForConditionalGeneration, T5Tokenizer
-from fastapi.templating import Jinja2Templates  # UI
-from fastapi.responses import HTMLResponse
-
-app = FastAPI(title="Text Summarizer App", description="Text Summarization using T5", version="1.0")
 
 MODEL_NAME = "maverick707/ai-text-summarizer-t5"
 
-model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
-tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
 
-# Dynamic quantization: converts the Linear layer weights from float32 to
-# int8. This is what actually saves memory (roughly cuts model RAM usage in
-# half to a third) with almost no code change and no accuracy loss worth
-# mentioning for a resume project.
-model = torch.quantization.quantize_dynamic(
-    model, {torch.nn.Linear}, dtype=torch.qint8
-)
-model.eval()
+@st.cache_resource
+def load_model():
+    model = T5ForConditionalGeneration.from_pretrained(
+        MODEL_NAME, low_cpu_mem_usage=True
+    )
+    tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
 
-device = torch.device("cpu")  # free-tier hosts never have a GPU anyway
-model.to(device)
-
-templates = Jinja2Templates(directory=".")
-
-
-class DialogueInput(BaseModel):
-    dialogue: str
+    model = torch.quantization.quantize_dynamic(
+        model, {torch.nn.Linear}, dtype=torch.qint8
+    )
+    model.eval()
+    return model, tokenizer
 
 
 def clean_data(text):
     text = re.sub(r"\r\n", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"<.*?>", " ", text)
-    text = text.strip().lower()
-    return text
+    return text.strip().lower()
 
 
-def summarize_dialogue(dialogue: str) -> str:
+def summarize_dialogue(dialogue, model, tokenizer):
     dialogue = clean_data(dialogue)
-
     inputs = tokenizer(
         dialogue,
         padding="max_length",
         max_length=512,
         truncation=True,
         return_tensors="pt",
-    ).to(device)
-
+    )
     with torch.no_grad():
         targets = model.generate(
             input_ids=inputs["input_ids"],
@@ -59,21 +44,26 @@ def summarize_dialogue(dialogue: str) -> str:
             num_beams=2,
             early_stopping=True,
         )
-
-    summary = tokenizer.decode(targets[0], skip_special_tokens=True)
-    return summary
+    return tokenizer.decode(targets[0], skip_special_tokens=True)
 
 
-# API endpoints
-@app.post("/summarize/")
-async def summarize(dialogue_input: DialogueInput):
-    summary = summarize_dialogue(dialogue_input.dialogue)
-    return {"summary": summary}
+st.set_page_config(page_title="Text Summarizer", page_icon="📝")
+st.title("📝 Text Summarizer")
+st.caption("using a fine-tuned T5 model (Hugging Face)")
 
+model, tokenizer = load_model()
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html"
-    )
+dialogue = st.text_area(
+    "Write or paste your content below:",
+    height=200,
+    placeholder="Enter your content here...",
+)
+
+if st.button("Summarize", type="primary"):
+    if dialogue.strip():
+        with st.spinner("Summarizing..."):
+            summary = summarize_dialogue(dialogue, model, tokenizer)
+        st.subheader("Content Summary")
+        st.write(summary)
+    else:
+        st.warning("Please enter some text first.")
